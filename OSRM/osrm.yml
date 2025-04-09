@@ -1,0 +1,46 @@
+version: '3.8'
+services:
+  init-data:
+    image: osrm/osrm-backend:v5.25.0
+    volumes:
+      - ./data:/data
+    command: >
+      /bin/sh -c "
+      if [ ! -f /data/map.osm.pbf ]; then
+        echo 'Downloading map data...' &&
+        echo 'deb http://deb.debian.org/debian bullseye main' > /etc/apt/sources.list &&
+        apt-get update && apt-get install -y --allow-unauthenticated wget &&
+        wget -O /data/map.osm.pbf https://download.geofabrik.de/europe/bulgaria-latest.osm.pbf &&
+        echo 'Download complete'
+      else
+        echo 'Map data already exists'
+      fi &&
+      if [ ! -f /data/map.osrm ]; then
+        echo 'Processing OSRM data...' &&
+        osrm-extract -p /opt/car.lua /data/map.osm.pbf &&
+        osrm-partition /data/map.osrm &&
+        osrm-customize /data/map.osrm &&
+        echo 'OSRM processing complete'
+      else
+        echo 'OSRM data already processed'
+      fi"
+    profiles:
+      - init
+
+  osrm:
+    image: osrm/osrm-backend:v5.25.0
+    ports:
+      - "${OSRM_PORT:-5000}:5000"
+    volumes:
+      - ./data:/data
+    command: "osrm-routed --algorithm mld --max-table-size 1000 /data/map.osrm"
+    restart: unless-stopped
+    profiles:
+      - app
+
+volumes:
+  data:
+
+networks:
+  default:
+    driver: bridge
