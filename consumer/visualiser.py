@@ -8,9 +8,6 @@ processed_data = pd.read_csv('processed_gps_data.csv')
 raw_gps = raw_data[['veh_id', 'lat', 'lon', 'alt', 'ts']].dropna()
 processed_gps = processed_data[['veh_id', 'lat', 'lon', 'alt', 'ts']].dropna()
 
-raw_gps.to_csv('raw_gps_export.csv', index=False)
-processed_gps.to_csv('processed_gps_export.csv', index=False)
-
 map_center = [raw_gps['lat'].mean(), raw_gps['lon'].mean()]
 
 colors = ['blue', 'red', 'black', 'orange', 'darkred', 'cadetblue', 'darkgreen']

@@ -3,13 +3,12 @@ from kafka import KafkaConsumer
 import pandas as pd
 import time
 
-# Configure Kafka consumer
 consumer = KafkaConsumer(
     'processed_gps_data',
     bootstrap_servers='localhost:9092',
     auto_offset_reset='earliest',
-    enable_auto_commit=True,              # auto-commit offsets
-    group_id='exporter-consumer-group',   # give your script a group ID
+    enable_auto_commit=True,             
+    group_id='exporter-consumer-group',   
     value_deserializer=lambda x: json.loads(x.decode('utf-8')),
     consumer_timeout_ms=10000
 )
