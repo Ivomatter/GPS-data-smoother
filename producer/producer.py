@@ -98,10 +98,12 @@ def stream_vehicle_data(veh_id, records, partition_count=3):
             partition=partition  
         )
         print(f"Sent for vehicle {veh_id} to partition {partition}: {processed_record['lat']}, {processed_record['lon']}")
-        # time.sleep(random.uniform(0, 2))  # Sleep 0–2s
+        time.sleep(random.uniform(0, 2))  # Sleep 0–2s
 
 def get_partition(veh_id, partition_count=3):
-
+    # I first used a hashing script to split to let the vehicles get a dedicated partition based on their hashes, however
+    # that wasn't ideal, as collisions were common and often 2 vehicles got sent to one partition.
+    # There is definitely room to enable scalability to producers allocating vehicles to most-free partitions first
     vehicle_mapping = {
         "A2317": 0,
         "A2044": 1,
@@ -113,6 +115,7 @@ def get_partition(veh_id, partition_count=3):
         return vehicle_mapping[veh_id]
     else:
         # Simple fallback, not final.
+       
         return len(veh_id) % partition_count
 
 
