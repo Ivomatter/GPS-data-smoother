@@ -79,32 +79,30 @@ func (bp *BatchProcessor) AddRecord(record *GPSRecord) error {
 
 func (bp *BatchProcessor) processBatch() error {
 	vehicleGroups := make(map[string][]*GPSRecord)
-	filteredRecords := make([]*GPSRecord, 0, len(bp.records))
 
-	// Step 1: Filter records (unchanged)
+	// Step 1: Filter records based on quality criteria
 	for _, record := range bp.records {
 		if (record.Speed >= 1.0 && record.Signal >= 27 && record.Sats > 7) ||
 			!(record.Speed == 0 && record.SegFraction < 0.01) {
 			vehicleGroups[record.VehicleID] = append(vehicleGroups[record.VehicleID], record)
-			filteredRecords = append(filteredRecords, record)
 		}
 	}
 
-	// Step 2: Process with OSRM and collect matched records
-	matchedRecords := make([]*GPSRecord, 0, len(filteredRecords))
+	// Step 2: Process each vehicle's records
+	var processedRecords []*GPSRecord
 	for vehID, records := range vehicleGroups {
-		processed, err := bp.processWithOSRM(vehID, records)
+		matched, err := bp.processVehicleRecords(vehID, records)
 		if err != nil {
-			log.Printf("Error processing with OSRM (vehicle %s): %v", vehID, err)
-			continue // Skip failed batches
+			log.Printf("Vehicle %s processing failed: %v", vehID, err)
+			continue
 		}
-		matchedRecords = append(matchedRecords, processed...)
+		processedRecords = append(processedRecords, matched...)
 	}
 
-	// Step 3: Publish only matched records to Kafka
-	for _, record := range matchedRecords {
+	// Step 3: Publish successfully processed records
+	for _, record := range processedRecords {
 		if err := bp.publishToKafka(record); err != nil {
-			log.Printf("Error publishing to Kafka: %v", err)
+			log.Printf("Kafka publish failed: %v", err)
 		}
 	}
 
@@ -113,25 +111,34 @@ func (bp *BatchProcessor) processBatch() error {
 	return nil
 }
 
-func (bp *BatchProcessor) processWithOSRM(vehicleID string, records []*GPSRecord) ([]*GPSRecord, error) {
+func (bp *BatchProcessor) processVehicleRecords(vehicleID string, records []*GPSRecord) ([]*GPSRecord, error) {
 	if len(records) <= 1 {
-		return nil, nil // Not enough points for matching
+		return nil, nil // Skip single-point batches
 	}
 
-	// Sort records by timestamp (ascending)
+	// Ensure monotonically increasing timestamps
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].Timestamp < records[j].Timestamp
 	})
-
-	// Ensure timestamps are strictly increasing (fix duplicates by adding 1ms)
 	for i := 1; i < len(records); i++ {
 		if records[i].Timestamp <= records[i-1].Timestamp {
 			records[i].Timestamp = records[i-1].Timestamp + 1
 		}
 	}
 
-	// Build OSRM request (unchanged)
+	// Try OSRM match first
+	matched, err := bp.tryOSRMMatch(records)
+	if err == nil {
+		return matched, nil
+	}
+
+	log.Printf("Match failed for %s, falling back to nearest: %v", vehicleID, err)
+	return bp.fallbackToNearest(records)
+}
+
+func (bp *BatchProcessor) tryOSRMMatch(records []*GPSRecord) ([]*GPSRecord, error) {
 	var coordStr, tsStr, radiusStr strings.Builder
+
 	for i, record := range records {
 		if i > 0 {
 			coordStr.WriteString(";")
@@ -150,12 +157,10 @@ func (bp *BatchProcessor) processWithOSRM(vehicleID string, records []*GPSRecord
 		radiusStr.WriteString(fmt.Sprintf("%d", radius))
 	}
 
-	osrmURL := fmt.Sprintf("http://localhost:5000/match/v1/driving/%s?timestamps=%s&radiuses=%s&geometries=geojson&overview=full&gaps=split&tidy=true",
+	url := fmt.Sprintf("http://localhost:5000/match/v1/driving/%s?timestamps=%s&radiuses=%s&geometries=geojson",
 		coordStr.String(), tsStr.String(), radiusStr.String())
 
-	// Send request to OSRM (unchanged)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(osrmURL)
+	resp, err := http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("OSRM request failed: %v", err)
 	}
@@ -163,37 +168,87 @@ func (bp *BatchProcessor) processWithOSRM(vehicleID string, records []*GPSRecord
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("OSRM request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("OSRM error %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse OSRM response (unchanged)
-	var osrmResponse struct {
+	var result struct {
 		Code        string `json:"code"`
 		Tracepoints []struct {
 			Location []float64 `json:"location"`
 		} `json:"tracepoints"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&osrmResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse OSRM response: %v", err)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("parse error: %v", err)
 	}
 
-	if osrmResponse.Code != "Ok" || len(osrmResponse.Tracepoints) == 0 {
-		return nil, fmt.Errorf("OSRM returned invalid response: %s", osrmResponse.Code)
+	if result.Code != "Ok" || len(result.Tracepoints) != len(records) {
+		return nil, fmt.Errorf("incomplete match (%d/%d points)",
+			len(result.Tracepoints), len(records))
 	}
 
-	// Filter matched records and update coordinates
-	matchedRecords := make([]*GPSRecord, 0, len(records))
+	// Update records with matched coordinates
+	matched := make([]*GPSRecord, 0, len(records))
 	for i, record := range records {
-		if i < len(osrmResponse.Tracepoints) && osrmResponse.Tracepoints[i].Location != nil {
-			// Update coordinates with OSRM-matched values
-			record.Lon = osrmResponse.Tracepoints[i].Location[0]
-			record.Lat = osrmResponse.Tracepoints[i].Location[1]
-			matchedRecords = append(matchedRecords, record)
+		if result.Tracepoints[i].Location != nil {
+			record.Lon = result.Tracepoints[i].Location[0]
+			record.Lat = result.Tracepoints[i].Location[1]
+			matched = append(matched, record)
 		}
 	}
 
-	return matchedRecords, nil
+	return matched, nil
+}
+
+func (bp *BatchProcessor) fallbackToNearest(records []*GPSRecord) ([]*GPSRecord, error) {
+	results := make([]*GPSRecord, 0, len(records))
+
+	for _, record := range records {
+		lon, lat, err := bp.snapToNearestRoad(record.Lon, record.Lat)
+		if err != nil {
+			log.Printf("Nearest failed for (%.6f,%.6f): %v",
+				record.Lon, record.Lat, err)
+			continue
+		}
+
+		record.Lon = lon
+		record.Lat = lat
+		results = append(results, record)
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("all nearest attempts failed")
+	}
+	return results, nil
+}
+
+func (bp *BatchProcessor) snapToNearestRoad(lon, lat float64) (float64, float64, error) {
+	url := fmt.Sprintf("http://localhost:5000/nearest/v1/driving/%.6f,%.6f", lon, lat)
+	resp, err := http.Get(url)
+	if err != nil {
+		return lon, lat, fmt.Errorf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return lon, lat, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Waypoints []struct {
+			Location []float64 `json:"location"`
+		} `json:"waypoints"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return lon, lat, fmt.Errorf("parse error: %v", err)
+	}
+
+	if len(result.Waypoints) == 0 || result.Waypoints[0].Location == nil {
+		return lon, lat, fmt.Errorf("no road found")
+	}
+
+	return result.Waypoints[0].Location[0], result.Waypoints[0].Location[1], nil
 }
 
 func (bp *BatchProcessor) publishToKafka(record *GPSRecord) error {
