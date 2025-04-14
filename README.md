@@ -16,8 +16,8 @@ This pipeline simulates a real-time GPS data stream, applies data cleaning and s
 - **Go** – Concurrent stream processing with batching
 - **Kafka** – Messaging backbone
 - **OSRM** – Road snapping and routing
-- **Docker Compose** – Containerized OSRM
-- **[Any plotting tool you used]** – Data visualization
+- **Docker Compose** – Containerized OSRM and Kafka
+- **Folium** – Data visualization
 
 ---
 
@@ -27,7 +27,7 @@ This pipeline simulates a real-time GPS data stream, applies data cleaning and s
 
 - Written in **Python**
 - Reads raw GPS data from CSV
-- Produces messages concurrently per vehicle to Kafka with a random 0–2s interval
+- Produces messages concurrently per vehicle to a Kafka topic - ```raw_gps_data``` - with a random 0–2s interval
 
 ### 2. 🔄 Data Processing
 
@@ -37,11 +37,18 @@ This pipeline simulates a real-time GPS data stream, applies data cleaning and s
 - Smoothing applied via:
   - **Imputation** (filling missing data fields with known data from previous records, completing missing data)
   - **Projection** (snapping coordinates to roads with OSRM)
-- Smoothed output is published to another Kafka topic
+- Smoothed output is published to another Kafka topic - ```processed_gps_data```
 
 > ⚠️ While the full data transformation pipeline isn't complete, the imputation strategy has been reviewed and outlined for future improvements.
 
-### 3. 🗺️ Visualisation
+### 3. Writing to file
+- Written in **Python**
+- Reads processed GPS records from ```processed_gps_data``` and writes them to ```processed_gps_data.csv```
+
+### 4. 🗺️ Visualisation
+
+- Using **Folium** written in **Python**
+- Creates two interactive maps - one with the raw data, one with the processed data.
 
 The difference between raw and smoothed GPS data is shown below:
 
@@ -50,20 +57,23 @@ The difference between raw and smoothed GPS data is shown below:
 
 **After Smoothing**  
 ![After](./images/after.png)
+As you can see, there is yet room for improvement
 
 ---
 
 ## 🚧 Future Improvements
 
-- Finalize imputation logic for edge cases
-- Add persistent storage and a REST API
+- Finalize imputation logic
+- Optimize GPS Coordinate smoothing logic
+- Combine the execution steps into a single script instead of having to run each and every file
+- Add persistent storage
 - Build a lightweight frontend for live GPS path tracking
 
 ---
 
 ## 🤖 Notes on AI Use
 
-AI tools like ChatGPT were used as coding assistants to speed up development. All code was understood, reviewed, and adapted to fit the specific task and data.
+AI tools, including but not limited to ChatGPT, Claude, Deepseek were used as coding assistants to speed up development. All code was understood, reviewed, and adapted to fit the specific task and data.
 
 ---
 
@@ -71,8 +81,7 @@ Thanks for checking this out!
 
 
 
-
-# Setup
+# Setup:
 
 ## 1. Boot up Kafka
 
