@@ -14,6 +14,9 @@ producer = KafkaProducer(
 CSV_FILE = 'raw_gps.csv'
 TOPIC = 'raw_gps_data'
 
+partition_vehicle_count = defaultdict(int)
+vehicle_to_partition = {}
+
 def load_data():
     data_by_vehicle = defaultdict(list)
     with open(CSV_FILE, newline='') as csvfile:
@@ -85,7 +88,7 @@ def preprocess_record(record):
 
 def stream_vehicle_data(veh_id, records, partition_count=3):
 
-    partition = get_partition(veh_id, partition_count)
+    partition = get_least_loaded_partition(veh_id, partition_count)
     
     print(f"Vehicle {veh_id} assigned to partition {partition}")
     
@@ -97,26 +100,18 @@ def stream_vehicle_data(veh_id, records, partition_count=3):
             value=processed_record,
             partition=partition  
         )
-        print(f"Sent for vehicle {veh_id} to partition {partition}: {processed_record['lat']}, {processed_record['lon']}")
+        # print(f"Sent for vehicle {veh_id} to partition {partition}: {processed_record['lat']}, {processed_record['lon']}")
         time.sleep(random.uniform(0, 2))  # Sleep 0–2s
 
-def get_partition(veh_id, partition_count=3):
-    # I first used a hashing script to split to let the vehicles get a dedicated partition based on their hashes, however
-    # that wasn't ideal, as collisions were common and often 2 vehicles got sent to one partition.
-    # There is definitely room to enable scalability to producers allocating vehicles to most-free partitions first
-    vehicle_mapping = {
-        "A2317": 0,
-        "A2044": 1,
-        "TB1620": 2,
 
-    }
+def get_least_loaded_partition(veh_id, partition_count=3):
+    if veh_id in vehicle_to_partition:
+        return vehicle_to_partition[veh_id]
     
-    if veh_id in vehicle_mapping:
-        return vehicle_mapping[veh_id]
-    else:
-        # Simple fallback, not final.
-       
-        return len(veh_id) % partition_count
+    min_partition = min(range(partition_count), key=lambda p: partition_vehicle_count[p])
+    vehicle_to_partition[veh_id] = min_partition
+    partition_vehicle_count[min_partition] += 1
+    return min_partition
 
 
 def main():
