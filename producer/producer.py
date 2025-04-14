@@ -5,13 +5,15 @@ import threading
 import time
 from kafka import KafkaProducer
 from collections import defaultdict
+from kafka.admin import KafkaAdminClient, NewTopic
+from kafka.errors import TopicAlreadyExistsError
 
 producer = KafkaProducer(
     bootstrap_servers='localhost:9092',
     value_serializer=lambda v: json.dumps(v).encode('utf-8')
 )
 
-CSV_FILE = 'raw_gps.csv'
+CSV_FILE = '../data/raw_gps.csv'
 TOPIC = 'raw_gps_data'
 
 partition_vehicle_count = defaultdict(int)
@@ -113,8 +115,29 @@ def get_least_loaded_partition(veh_id, partition_count=3):
     partition_vehicle_count[min_partition] += 1
     return min_partition
 
+def create_topic(topic_name, num_partitions=3):
+    admin_client = KafkaAdminClient(bootstrap_servers='localhost:9092', client_id='topic_creator')
+    
+    topic = NewTopic(
+        name=topic_name,
+        num_partitions=num_partitions,
+        replication_factor=1,
+        topic_configs={
+            "cleanup.policy": "compact",
+            "delete.retention.ms": "1000"
+        }
+    )
+    
+    try:
+        admin_client.create_topics(new_topics=[topic], validate_only=False)
+        print(f"Topic '{topic_name}' created.")
+    except TopicAlreadyExistsError:
+        print(f"Topic '{topic_name}' already exists.")
+    finally:
+        admin_client.close()
 
 def main():
+    create_topic(TOPIC, num_partitions=3)
     data_by_vehicle = load_data()
     threads = []
     for veh_id, records in data_by_vehicle.items():

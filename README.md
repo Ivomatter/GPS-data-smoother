@@ -91,30 +91,26 @@ Open ./kafka in terminal and run
 
 ```docker compose up -d```
 
-
-Enter Kafka through docker
+### Some useful Kafka debudding commands I made use of
+Enter Kafka container through docker
 
 ```docker exec -it kafka-kafka-1 bash```
 
-Create the raw_gps_data topic for producing raw data
+List currently living topics:
 
-```kafka-topics --create --topic raw_gps_data --bootstrap-server localhost:9092 --partitions 3 --config "cleanup.policy=compact" --config "delete.retention.ms=1000"```
+```kafka-topics --list --bootstrap-server localhost:9092```
 
-Check to see if the topic has been created:
+You can view the contents of currently active topics with:
 
-```bin/kafka-topics.sh --list --bootstrap-server localhost:9092```
+```kafka-console-consumer --bootstrap-server localhost:9092 --topic {topic-name} --from-beginning```
 
-You can view the contents of  currently active topics with
+or check the status of its partitioning with:
 
-```kafka-console-consumer --bootstrap-server localhost:9092 --topic processed_gps_data --from-beginning```
+```kafka-topics --describe --topic {topic-name} --bootstrap-server localhost:9092```
 
-or check the status of its partitioning with
+In case you need to clear a kafka topic:
 
-```kafka-topics --describe --topic your-topic-name --bootstrap-server localhost:9092```
-
-In case you need to clera a kafka topic:
-
-```kafka-topics --delete --bootstrap-server localhost:9092 --topic raw_gps_data```
+```kafka-topics --delete --bootstrap-server localhost:9092 --topic {topic-name}```
 
 
 ## 2. Begin producing from raw_gps.csv
