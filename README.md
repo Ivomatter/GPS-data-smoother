@@ -87,7 +87,7 @@ Thanks for checking this out!
 
 
 
-Open ./kafka in terminal and run
+Open the ```kafka``` directory and run
 
 ```docker compose up -d```
 
@@ -115,19 +115,27 @@ In case you need to clear a kafka topic:
 
 ## 2. Begin producing from raw_gps.csv
 
-You need to install kafka-python
+Create a venv and install dependencies
 
-```pip install kafka-python```
+```python3 -m venv venv && source venv/bin/activate && pip install kafka-python pandas folium```
 
-Then run the producer script:
+Navigate to ```producer``` & run the script:
 
 ```python3 producer.py```
 
 ## 3. Smooth and impute data with Go & OSRM
+Navigate to  ```OSRM-processing``` directory and run:
+
+Build & run OSRM:
+
+- docker compose -f ./osrm.yml --profile init up --build
+- docker compose -f ./osrm.yml --profile app up --build
+
 ```go run client.go```
 
 ## 4. Output processed data to file 
-Once streaming, fire up /consumer/output.py which reads from processed_gps_data (creted from client.go) and serializes it to csv and json
+Navigate to ```consumers``` and fire up the script:
+
 ``python3 output.py``
 
 ## 5. Visualise the data
@@ -135,6 +143,7 @@ Run the visualiser to create two maps - one routing the raw data, and one routin
 
 ```python3 visualiser.py```
  
-This will create raw_gps_data_map.html and processed_gps_data_map.html
+This will create a directory, ```maps```, containing 
+```raw_gps_data_map.html``` and ```processed_gps_data_map.html```
 
 

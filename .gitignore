@@ -1,0 +1,7 @@
+/venv/
+/OSRM-processing/data
+/consumer/kafka_2.13-4.0.0
+
+/maps/
+/data/processed_gps_data.csv
+/data/processed_gps_data.json
