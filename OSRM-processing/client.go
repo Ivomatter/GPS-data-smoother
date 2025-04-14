@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,7 +17,6 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
-// GPSRecord represents a single GPS data point
 type GPSRecord struct {
 	Alt          float64 `json:"alt"`
 	Lat          float64 `json:"lat"`
@@ -49,67 +46,29 @@ type GPSRecord struct {
 	InDepot      bool    `json:"in_depot"`
 }
 
-const MISSING_INT = -1
-
-// BatchProcessor handles processing of GPS data in batches
 type BatchProcessor struct {
-	records        []*GPSRecord
-	vehicleContext map[string]*VehicleContext
-	routeMapping   map[string]string // line_id -> route_id mapping
-	mutex          sync.Mutex
-	batchSize      int
-	producer       *kafka.Producer
-	outputTopic    string
+	records     []*GPSRecord
+	mutex       sync.Mutex
+	batchSize   int
+	producer    *kafka.Producer
+	outputTopic string
 }
 
-// VehicleContext maintains state for a specific vehicle
-type VehicleContext struct {
-	LastKnownLineID     string
-	LastKnownRouteID    string
-	LastKnownTaskID     int
-	LastKnownNextTaskID int
-	LastKnownPrevStopID string
-	LastKnownCurStopID  string
-	LastSegFraction     float64
-	LastLat             float64
-	LastLon             float64
-	LastTimestamp       int64
-	RoutePoints         [][]float64       // For calculating seg_fraction
-	TaskHistory         map[int]int       // task_id -> next_task_id mapping
-	LineRouteMapping    map[string]string // line_id -> route_id mapping
-}
-
-// NewBatchProcessor creates a new batch processor
 func NewBatchProcessor(batchSize int, producer *kafka.Producer, outputTopic string) *BatchProcessor {
 	return &BatchProcessor{
-		records:        make([]*GPSRecord, 0, batchSize),
-		vehicleContext: make(map[string]*VehicleContext),
-		routeMapping:   make(map[string]string),
-		batchSize:      batchSize,
-		producer:       producer,
-		outputTopic:    outputTopic,
+		records:     make([]*GPSRecord, 0, batchSize),
+		batchSize:   batchSize,
+		producer:    producer,
+		outputTopic: outputTopic,
 	}
 }
 
-// AddRecord adds a record to the batch, processes if batch size is reached
 func (bp *BatchProcessor) AddRecord(record *GPSRecord) error {
 	bp.mutex.Lock()
 	defer bp.mutex.Unlock()
 
 	bp.records = append(bp.records, record)
 
-	// Ensure we have a context for this vehicle
-	if _, exists := bp.vehicleContext[record.VehicleID]; !exists {
-		bp.vehicleContext[record.VehicleID] = &VehicleContext{
-			TaskHistory:      make(map[int]int),
-			LineRouteMapping: make(map[string]string),
-		}
-	}
-
-	// Update context with this record's data
-	bp.updateContext(record)
-
-	// If we've reached batch size, process the batch
 	if len(bp.records) >= bp.batchSize {
 		return bp.processBatch()
 	}
@@ -117,107 +76,20 @@ func (bp *BatchProcessor) AddRecord(record *GPSRecord) error {
 	return nil
 }
 
-// updateContext updates vehicle context with current record data
-func (bp *BatchProcessor) updateContext(record *GPSRecord) {
-	ctx := bp.vehicleContext[record.VehicleID]
-
-	// Update line_id -> route_id mapping if we have both
-	if record.LineID != "" && record.RouteID != "" {
-		ctx.LineRouteMapping[record.LineID] = record.RouteID
-		bp.routeMapping[record.LineID] = record.RouteID
-	}
-
-	// Update task_id -> next_task_id mapping if we have both
-	if record.TaskID != MISSING_INT && record.NextTaskID != MISSING_INT {
-		ctx.TaskHistory[record.TaskID] = record.NextTaskID
-	}
-
-	// Update last known values for this vehicle
-	if record.LineID != "" {
-		ctx.LastKnownLineID = record.LineID
-	}
-	if record.RouteID != "" {
-		ctx.LastKnownRouteID = record.RouteID
-	}
-	if record.TaskID != MISSING_INT {
-		ctx.LastKnownTaskID = record.TaskID
-	}
-	if record.NextTaskID != MISSING_INT {
-		ctx.LastKnownNextTaskID = record.NextTaskID
-	}
-	if record.PrevStopID != "" {
-		ctx.LastKnownPrevStopID = record.PrevStopID
-	}
-	if record.CurStopID != "" {
-		ctx.LastKnownCurStopID = record.CurStopID
-	}
-
-	ctx.LastLat = record.Lat
-	ctx.LastLon = record.Lon
-	ctx.LastTimestamp = record.Timestamp
-}
-
-// imputeMissingData fills in missing fields based on context
-func (bp *BatchProcessor) imputeMissingData() {
-	for _, record := range bp.records {
-		ctx := bp.vehicleContext[record.VehicleID]
-
-		// Impute route_id from line_id if missing
-		if record.RouteID == "" && record.LineID != "" {
-			if routeID, exists := bp.routeMapping[record.LineID]; exists {
-				record.RouteID = routeID
-			} else if routeID, exists := ctx.LineRouteMapping[record.LineID]; exists {
-				record.RouteID = routeID
-			}
-		}
-
-		if record.PrevStopID == "" && ctx.LastKnownCurStopID != "" {
-			if record.CurStopID == ctx.LastKnownCurStopID {
-				record.PrevStopID = ctx.LastKnownPrevStopID
-			} else {
-				record.PrevStopID = ctx.LastKnownCurStopID
-			}
-		}
-
-		// Impute task_id if we know the previous task's next_task_id
-		if record.TaskID == MISSING_INT && ctx.LastKnownNextTaskID != MISSING_INT {
-			if record.NextTaskID == ctx.LastKnownNextTaskID {
-				record.TaskID = ctx.LastKnownTaskID
-			} else {
-				record.TaskID = ctx.LastKnownNextTaskID
-			}
-		}
-
-		// Impute next_task_id if we know this task's next task from history
-		if record.NextTaskID == MISSING_INT && record.TaskID != MISSING_INT {
-			if nextTask, exists := ctx.TaskHistory[record.TaskID]; exists {
-				record.NextTaskID = nextTask
-			}
-		}
-
-		if record.Status == "on break" {
-			record.SegFraction = 1.0
-		}
-
-		// Update last seg_fraction if we have a valid one
-		if record.SegFraction > 0 {
-			ctx.LastSegFraction = record.SegFraction
-		}
-	}
-}
-
-// processBatch processes the current batch through OSRM and publishes to Kafka
 func (bp *BatchProcessor) processBatch() error {
-	// First impute missing data based on context
-	bp.imputeMissingData()
-
-	// Group records by vehicle for OSRM batching
 	vehicleGroups := make(map[string][]*GPSRecord)
+	filteredRecords := make([]*GPSRecord, 0, len(bp.records))
+
 	for _, record := range bp.records {
-		vehicleGroups[record.VehicleID] = append(vehicleGroups[record.VehicleID], record)
+		if record.Speed >= 1.0 && record.Signal >= 27 && record.Sats > 7 {
+			vehicleGroups[record.VehicleID] = append(vehicleGroups[record.VehicleID], record)
+			filteredRecords = append(filteredRecords, record)
+		} else if !(record.Speed == 0 && record.SegFraction < 0.01) {
+			vehicleGroups[record.VehicleID] = append(vehicleGroups[record.VehicleID], record)
+			filteredRecords = append(filteredRecords, record)
+		}
 	}
 
-	// Process each vehicle's points with OSRM
 	for vehID, records := range vehicleGroups {
 		err := bp.processWithOSRM(vehID, records)
 		if err != nil {
@@ -225,22 +97,20 @@ func (bp *BatchProcessor) processBatch() error {
 		}
 	}
 
-	// After processing, publish all records to output Kafka topic
-	for _, record := range bp.records {
+	for _, record := range filteredRecords {
 		err := bp.publishToKafka(record)
 		if err != nil {
 			log.Printf("Error publishing to Kafka: %v", err)
 		}
 	}
 
-	// Clear the batch
 	bp.records = make([]*GPSRecord, 0, bp.batchSize)
 
 	return nil
 }
 
-// processWithOSRM sends coordinates to OSRM for matching and smoothing
 func (bp *BatchProcessor) processWithOSRM(vehicleID string, records []*GPSRecord) error {
+
 	if len(records) <= 1 {
 		return nil // Need at least 2 points for matching
 	}
@@ -263,17 +133,15 @@ func (bp *BatchProcessor) processWithOSRM(vehicleID string, records []*GPSRecord
 		coordStr.WriteString(fmt.Sprintf("%.6f,%.6f", record.Lon, record.Lat))
 		tsStr.WriteString(fmt.Sprintf("%d", timestamps[i]))
 
-		// Dynamically adjust radius based on GPS quality (optional)
-		radius := 50 // Default radius in meters
-		if record.Signal > 4 {
-			radius = 20
-		} else if record.Signal < 2 {
+		radius := 30
+		if record.Signal >= 30 && record.Sats > 9 {
+			radius = 15
+		} else if record.Signal < 20 || record.Sats <= 5 {
 			radius = 100
 		}
 		radiusStr.WriteString(fmt.Sprintf("%d", radius))
 	}
 
-	// Build the full OSRM match URL
 	osrmURL := fmt.Sprintf("http://localhost:5000/match/v1/driving/%s?timestamps=%s&radiuses=%s&geometries=geojson&overview=full&gaps=split&tidy=true",
 		coordStr.String(), tsStr.String(), radiusStr.String())
 
@@ -339,38 +207,11 @@ func (bp *BatchProcessor) processWithOSRM(vehicleID string, records []*GPSRecord
 		record.Lon = matchedLon
 		record.Lat = matchedLat
 
-		if i == 0 {
-			record.SegFraction = 0.0
-		} else if i == len(records)-1 {
-			record.SegFraction = 1.0
-		} else if len(osrmResponse.Matchings) > 0 {
-			matchingIdx := osrmResponse.Tracepoints[i].MatchingsIndex
-			if matchingIdx >= 0 && matchingIdx < len(osrmResponse.Matchings) {
-				waypointIndex := -1
-				for j, wp := range osrmResponse.Matchings[matchingIdx].Waypoints {
-					if wp.WaypointIndex == i {
-						waypointIndex = j
-						break
-					}
-				}
-				if waypointIndex >= 0 {
-					totalWaypoints := len(osrmResponse.Matchings[matchingIdx].Waypoints)
-					if totalWaypoints > 1 {
-						record.SegFraction = roundToThirdDecimal(float64(waypointIndex) / float64(totalWaypoints-1))
-					}
-				}
-			}
-		}
-
-		if record.Status == "on break" {
-			record.SegFraction = 1.0
-		}
 	}
 
 	return nil
 }
 
-// publishToKafka sends a processed record to the output Kafka topic
 func (bp *BatchProcessor) publishToKafka(record *GPSRecord) error {
 	jsonData, err := json.Marshal(record)
 	if err != nil {
@@ -388,13 +229,11 @@ func (bp *BatchProcessor) publishToKafka(record *GPSRecord) error {
 }
 
 func main() {
-	// Configuration
 	inputTopic := "raw_gps_data"
 	outputTopic := "processed_gps_data"
 	batchSize := 15
 	consumerCount := 3
 
-	// Create Kafka producer
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers": "localhost:9092",
 	})
@@ -403,15 +242,12 @@ func main() {
 	}
 	defer producer.Close()
 
-	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Channel for OS signals
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start consumers
 	var wg sync.WaitGroup
 	for i := 0; i < consumerCount; i++ {
 		wg.Add(1)
@@ -419,19 +255,15 @@ func main() {
 		go startConsumer(ctx, i, inputTopic, processor, &wg)
 	}
 
-	// Wait for interrupt signal
 	<-sigchan
 	log.Println("Received termination signal, shutting down...")
 
-	// Cancel context to signal consumers to stop
 	cancel()
 
-	// Wait for consumers to finish
 	wg.Wait()
 	log.Println("All consumers stopped, exiting")
 }
 
-// startConsumer initializes a Kafka consumer and processes incoming messages
 func startConsumer(ctx context.Context, id int, topic string, processor *BatchProcessor, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -452,7 +284,6 @@ func startConsumer(ctx context.Context, id int, topic string, processor *BatchPr
 		log.Fatalf("Consumer %d: Failed to subscribe: %v", id, err)
 	}
 
-	// Track vehicle IDs this consumer is handling
 	handledVehicles := make(map[string]bool)
 
 	log.Printf("Consumer %d started and waiting for messages", id)
@@ -473,14 +304,12 @@ func startConsumer(ctx context.Context, id int, topic string, processor *BatchPr
 				continue
 			}
 
-			// Extract vehicle ID from message key
 			vehicleID := string(msg.Key)
 			if vehicleID == "" {
 				log.Printf("Consumer %d: Received message without vehicle ID", id)
 				continue
 			}
 
-			// Track this vehicle if new
 			if !handledVehicles[vehicleID] {
 				handledVehicles[vehicleID] = true
 				log.Printf("Consumer %d now handling vehicle %s", id, vehicleID)
@@ -502,14 +331,4 @@ func startConsumer(ctx context.Context, id int, topic string, processor *BatchPr
 			}
 		}
 	}
-}
-
-func hashString(s string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	return h.Sum32()
-}
-
-func roundToThirdDecimal(val float64) float64 {
-	return math.Round(val*1000) / 1000
 }
